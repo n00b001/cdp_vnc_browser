@@ -1,0 +1,145 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release type'
+        required: true
+        default: 'minor'
+        type: choice
+        options:
+          - hotfix
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create ${{ github.event.inputs.release_type }} Release
+    runs-on: ubuntu-latest
+    
+    outputs:
+      new_version: ${{ steps.bump_version.outputs.new_version }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      
+      - name: Get current version
+        id: get_version
+        run: |
+          # Get the latest tag, default to v0.0.0 if none exists
+          latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "Latest tag: $latest_tag"
+          echo "current_version=$latest_tag" >> $GITHUB_OUTPUT
+      
+      - name: Bump version
+        id: bump_version
+        run: |
+          current="${{ steps.get_version.outputs.current_version }}"
+          
+          # Remove 'v' prefix if present
+          version="${current#v}"
+          
+          # Split version into components
+          IFS='.' read -r major minor patch <<< "$version"
+          
+          # Default to 0 if empty
+          major=${major:-0}
+          minor=${minor:-0}
+          patch=${patch:-0}
+          
+          # Bump based on release type
+          release_type="${{ github.event.inputs.release_type }}"
+          
+          case "$release_type" in
+            major)
+              major=$((major + 1))
+              minor=0
+              patch=0
+              ;;
+            minor)
+              minor=$((minor + 1))
+              patch=0
+              ;;
+            hotfix)
+              patch=$((patch + 1))
+              ;;
+          esac
+          
+          new_version="v${major}.${minor}.${patch}"
+          echo "New version: $new_version"
+          echo "new_version=$new_version" >> $GITHUB_OUTPUT
+      
+      - name: Create Git Tag
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "github-actions@github.com"
+          git tag "${{ steps.bump_version.outputs.new_version }}"
+          git push origin "${{ steps.bump_version.outputs.new_version }}"
+      
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.bump_version.outputs.new_version }}
+          name: Chrome CDP + noVNC ${{ steps.bump_version.outputs.new_version }}
+          body: |
+            ## Chrome CDP + noVNC Docker Image ${{ steps.bump_version.outputs.new_version }}
+            
+            **Release Type:** ${{ github.event.inputs.release_type }}
+            
+            ### Docker Images
+            
+            - `ghcr.io/${{ github.repository }}:${{ steps.bump_version.outputs.new_version }}`
+            - `ghcr.io/${{ github.repository }}:latest`
+            
+            ### Supported Platforms
+            
+            - `linux/amd64`
+            - `linux/arm64`
+            
+            ### Usage
+            
+            ```yaml
+            # docker-compose.yml
+            services:
+              chrome-cdp-novnc:
+                image: ghcr.io/${{ github.repository }}:${{ steps.bump_version.outputs.new_version }}
+                container_name: chrome-cdp-novnc
+                shm_size: "2gb"
+                security_opt:
+                  - seccomp:unconfined
+                cap_add:
+                  - SYS_ADMIN
+                ports:
+                  - "9222:9222"
+                  - "6080:6080"
+                volumes:
+                  - ./chrome-data:/data/chrome-profile
+            ```
+            
+            ### Quick Start
+            
+            ```bash
+            # Pull the image
+            docker pull ghcr.io/${{ github.repository }}:${{ steps.bump_version.outputs.new_version }}
+            
+            # Run with docker-compose
+            docker compose up -d
+            ```
+            
+            ### Access Points
+            
+            | Service | URL | Purpose |
+            |---------|-----|---------|
+            | **CDP** | `http://localhost:9222` | Browser automation endpoint |
+            | **noVNC** | `http://localhost:6080` | Web VNC interface |
+          generate_release_notes: true
+          draft: false
+          prerelease: false
