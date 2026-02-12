@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  chrome-cdp-novnc:
+    build: .
+    image: chrome-cdp-novnc:latest
+    container_name: chrome-cdp-novnc
+    restart: unless-stopped
+    shm_size: "2gb"
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_ADMIN
+    ports:
+      - "9222:9222"
+      - "6080:6080"
+    volumes:
+      - ./chrome-data:/data/chrome-profile
