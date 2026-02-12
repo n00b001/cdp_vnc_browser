@@ -55,7 +55,7 @@ sleep 2
 # Start Chrome (on internal port 9223)
 # Extensions ENABLED, full UI visible
 echo "Starting Chrome..."
-google-chrome-stable \
+/usr/bin/chrome \
     --no-first-run \
     --no-default-browser-check \
     --disable-background-networking \

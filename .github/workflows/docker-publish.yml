@@ -123,7 +123,7 @@ jobs:
           docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           
           # Test that Chrome binary exists
-          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest google-chrome-stable --version
+          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest /usr/bin/chrome --version
       
       - name: Test container startup
         run: |

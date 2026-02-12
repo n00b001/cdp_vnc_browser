@@ -37,12 +37,21 @@ RUN apt-get update && apt-get install -y \
     procps \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Google Chrome
-RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - && \
-    echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list && \
-    apt-get update && \
-    apt-get install -y google-chrome-stable && \
-    rm -rf /var/lib/apt/lists/*
+# Install Chrome/Chromium based on architecture
+# Google Chrome doesn't have ARM64 builds, use Chromium on ARM64
+RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+        wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor > /usr/share/keyrings/google-linux-signing-keyring.gpg && \
+        echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-linux-signing-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list && \
+        apt-get update && \
+        apt-get install -y google-chrome-stable && \
+        rm -rf /var/lib/apt/lists/* && \
+        ln -sf /usr/bin/google-chrome-stable /usr/bin/chrome; \
+    else \
+        apt-get update && \
+        apt-get install -y chromium-browser && \
+        rm -rf /var/lib/apt/lists/* && \
+        ln -sf /usr/bin/chromium-browser /usr/bin/chrome; \
+    fi
 
 # Create data directory
 RUN mkdir -p /data/chrome-profile
