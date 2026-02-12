@@ -15,7 +15,7 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: cdp_vnc_browser
+  IMAGE_NAME: ${{ github.repository }}
 
 permissions:
   contents: read
