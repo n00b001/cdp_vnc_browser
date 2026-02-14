@@ -20,7 +20,7 @@ docker run -d \
   -p 9222:9222 \
   -p 6080:6080 \
   -v $(pwd)/chrome-data:/data/chrome-profile \
-  ghcr.io/n00b001/cdp_vnc_browser:latest
+  ghcr.io/xfanth/cdp_vnc_browser:latest
 ```
 
 ### Option 2: Build Locally
@@ -223,12 +223,12 @@ shm_size: "4gb"
 This repository includes a GitHub Actions workflow that automatically builds and publishes Docker images to GitHub Packages on every push to `main`.
 
 - **Registry**: `ghcr.io` (GitHub Container Registry)
-- **Image**: `ghcr.io/n00b001/cdp_vnc_browser`
+- **Image**: `ghcr.io/xfanth/cdp_vnc_browser`
 - **Tags**: `latest`, commit SHA, and branch name
 
 To use the pre-built image:
 ```bash
-docker pull ghcr.io/n00b001/cdp_vnc_browser:latest
+docker pull ghcr.io/xfanth/cdp_vnc_browser:latest
 ```
 
 ## Security Notes

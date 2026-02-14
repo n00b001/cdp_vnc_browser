@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
   chrome-cdp-novnc:
-    image: ghcr.io/n00b001/cdp_vnc_browser:latest
+    image: ghcr.io/xfanth/cdp_vnc_browser:latest
     container_name: chrome-cdp-novnc
     restart: unless-stopped
     shm_size: "2gb"
