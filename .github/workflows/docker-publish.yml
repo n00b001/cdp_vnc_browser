@@ -6,270 +6,336 @@ on:
   pull_request:
     branches: [main]
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   packages: write
+  security-events: write
+  pull-requests: read
+  actions: read
 
 jobs:
-  check:
-    name: Check Build Needed
+  pre-commit:
+    name: Pre-Commit Checks
     runs-on: ubuntu-latest
-    outputs:
-      should_build: ${{ steps.check.outputs.should_build }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      
-      - name: Check if image already exists from PR
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pre-commit environment
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: |
+            pre-commit-${{ runner.os }}-
+
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      - name: Run pre-commit on all files
+        run: pre-commit run --all-files --show-diff-on-failure
+
+  check-pr-status:
+    name: Check PR Status
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    outputs:
+      can_skip_build: ${{ steps.check.outputs.can_skip_build }}
+      pr_run_id: ${{ steps.check.outputs.pr_run_id }}
+    steps:
+      - name: Check if merge came from a tested PR
         id: check
         env:
-          REGISTRY: ghcr.io
-          IMAGE_NAME: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "Checking if image for commit ${{ github.sha }} already exists..."
-          
-          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            IMAGE="${REGISTRY}/${IMAGE_NAME}:sha-${{ github.sha }}"
-            
-            if docker buildx imagetools inspect "${IMAGE}" > /dev/null 2>&1; then
-              echo "Image already exists from PR build, skipping rebuild"
-              echo "should_build=false" >> $GITHUB_OUTPUT
-            else
-              echo "Image does not exist, building new image"
-              echo "should_build=true" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "Not a main push, always build"
-            echo "should_build=true" >> $GITHUB_OUTPUT
+          COMMIT_SHA="${{ github.sha }}"
+          echo "Checking if commit $COMMIT_SHA came from a merged PR..."
+
+          PR_INFO=$(gh pr list \
+            --repo "${{ github.repository }}" \
+            --state merged \
+            --json number,mergeCommit,headRefName,headRefOid \
+            --jq ".[] | select(.mergeCommit.oid == \"$COMMIT_SHA\") | {number, headBranch: .headRefName, headSha: .headRefOid}" | head -1)
+
+          if [ -z "$PR_INFO" ]; then
+            echo "No merged PR found (direct push to main)"
+            echo "can_skip_build=false" >> $GITHUB_OUTPUT
+            exit 0
           fi
-  
+
+          echo "Found merged PR: $PR_INFO"
+          PR_NUM=$(echo "$PR_INFO" | jq -r '.number')
+          HEAD_BRANCH=$(echo "$PR_INFO" | jq -r '.headBranch')
+          PR_HEAD_SHA=$(echo "$PR_INFO" | jq -r '.headSha')
+
+          WORKFLOW_RUNS=$(gh run list \
+            --repo "${{ github.repository }}" \
+            --workflow "docker-publish.yml" \
+            --branch "$HEAD_BRANCH" \
+            --event "pull_request" \
+            --status success \
+            --limit 10 \
+            --json headBranch,conclusion,databaseId)
+
+          LATEST_RUN=$(echo "$WORKFLOW_RUNS" | \
+            jq --arg branch "$HEAD_BRANCH" \
+            'sort_by(.databaseId) | reverse | .[0] | select(.headBranch == $branch)')
+
+          if [ -z "$LATEST_RUN" ]; then
+            echo "No successful PR workflow runs found"
+            echo "can_skip_build=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          RUN_ID=$(echo "$LATEST_RUN" | jq -r '.databaseId')
+          echo "Found successful run: $RUN_ID"
+
+          ARTIFACTS=$(gh api repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts --jq '.artifacts | length')
+          if [ "$ARTIFACTS" -eq 0 ]; then
+            echo "Run has no artifacts"
+            echo "can_skip_build=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          RUN_HEAD_SHA=$(gh run view "$RUN_ID" --repo "${{ github.repository }}" --json headSha --jq '.headSha')
+          echo "Run head SHA: $RUN_HEAD_SHA"
+          echo "PR head SHA at merge: $PR_HEAD_SHA"
+
+          if [ "$RUN_HEAD_SHA" = "$PR_HEAD_SHA" ]; then
+            echo "PR head SHA matches run - code unchanged since test"
+            echo "can_skip_build=true" >> $GITHUB_OUTPUT
+            echo "pr_run_id=$RUN_ID" >> $GITHUB_OUTPUT
+          else
+            echo "PR was updated after testing (head SHA mismatch)"
+            echo "  Run head: $RUN_HEAD_SHA"
+            echo "  PR head: $PR_HEAD_SHA"
+            echo "can_skip_build=false" >> $GITHUB_OUTPUT
+          fi
+
   build:
-    name: Build and Push
+    name: Build Docker Image
     runs-on: ubuntu-latest
-    needs: check
-    if: needs.check.outputs.should_build == 'true'
-    
+    needs: [pre-commit, check-pr-status]
+    if: |
+      always() &&
+      needs.pre-commit.result == 'success' &&
+      (github.event_name == 'pull_request' ||
+       (needs.check-pr-status.result == 'success' && needs.check-pr-status.outputs.can_skip_build != 'true'))
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+        with:
+          fetch-depth: 0
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
-      
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Build and push Docker image (PR)
-        if: github.event_name == 'pull_request'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      
+
       - name: Extract Docker metadata
         id: meta
-        if: github.event_name != 'pull_request'
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=sha,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
-      
-      - name: Build and push Docker image (Main)
-        if: github.event_name != 'pull_request'
+            type=ref,event=pr
+            type=sha,prefix=
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          outputs: type=docker,dest=/tmp/docker-image.tar
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/docker-image.tar
+          retention-days: 1
+
+  smoke-test:
+    name: Smoke Test
+    runs-on: ubuntu-latest
+    needs: [pre-commit, build]
+    if: |
+      always() &&
+      needs.pre-commit.result == 'success' &&
+      needs.build.result == 'success'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        run: docker load -i docker-image.tar
+
+      - name: Tag image for testing
+        run: |
+          IMAGE_ID=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep "${{ env.IMAGE_NAME }}" | head -1)
+          docker tag "$IMAGE_ID" chrome-cdp-novnc:smoke-test
+
+      - name: Run smoke test
+        run: |
+          chmod +x scripts/smoke-test.sh
+          IMAGE_TAG=chrome-cdp-novnc:smoke-test ./scripts/smoke-test.sh
+        timeout-minutes: 15
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-logs
+          path: |
+            /tmp/build.log
+            /tmp/container.log
+          retention-days: 3
 
   security-scan:
     name: Security Scan
     runs-on: ubuntu-latest
-    needs: [check, build]
-    if: needs.check.outputs.should_build == 'true' && github.event_name != 'pull_request'
-    
+    needs: [pre-commit, build]
+    if: |
+      always() &&
+      needs.pre-commit.result == 'success' &&
+      needs.build.result == 'success'
+
     permissions:
       contents: read
       packages: read
       security-events: write
-    
+
     steps:
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      
+          name: docker-image
+
+      - name: Load Docker image
+        run: docker load -i docker-image.tar
+
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          image-ref: ${{ env.IMAGE_NAME }}:${{ github.sha }}
           format: 'sarif'
           output: 'trivy-results.sarif'
           severity: 'CRITICAL,HIGH'
           exit-code: '0'
           ignore-unfixed: true
-      
+
       - name: Upload scan results to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
           sarif_file: 'trivy-results.sarif'
 
-  test:
-    name: Test Docker Image
+  download-pr-artifacts:
+    name: Download PR Artifacts
     runs-on: ubuntu-latest
-    needs: [check, build]
-    if: needs.check.outputs.should_build == 'true' && github.event_name != 'pull_request'
-    
+    needs: [pre-commit, check-pr-status]
+    if: |
+      always() &&
+      needs.pre-commit.result == 'success' &&
+      needs.check-pr-status.result == 'success' &&
+      needs.check-pr-status.outputs.can_skip_build == 'true'
     steps:
-      - name: Login to GitHub Container Registry
+      - name: Download artifact from PR run
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+          run-id: ${{ needs.check-pr-status.outputs.pr_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Re-upload artifact for downstream jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/docker-image.tar
+          retention-days: 1
+
+  push-to-ghcr:
+    name: Push to GHCR
+    runs-on: ubuntu-latest
+    needs: [pre-commit, build, smoke-test, security-scan, check-pr-status, download-pr-artifacts]
+    if: |
+      always() &&
+      github.event_name == 'push' &&
+      needs.pre-commit.result == 'success' &&
+      (
+        (needs.build.result == 'success' && needs.smoke-test.result == 'success' && needs.security-scan.result == 'success') ||
+        (needs.download-pr-artifacts.result == 'success')
+      )
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Pull and test image
-        run: |
-          docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          
-          # Test that Chrome binary exists
-          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest /usr/bin/chrome --version
-      
-      - name: Test container startup
-        run: |
-          # Run container in background
-          docker run -d --name test-chrome \
-            --shm-size=2g \
-            --cap-add=SYS_ADMIN \
-            -p 9222:9222 \
-            -p 6080:6080 \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          
-          # Wait for services to start (health check in Dockerfile)
-          echo "Waiting for container to be healthy..."
-          for i in {1..60}; do
-            if docker ps | grep test-chrome | grep -q healthy; then
-              echo "Container is healthy!"
-              break
-            fi
-            sleep 2
-          done
-          
-          # Check if container is still running
-          docker ps | grep test-chrome
-          
-          # Test CDP endpoint
-          echo "Testing CDP endpoint..."
-          curl -f http://localhost:9222/json/list || echo "CDP not ready yet (expected in fresh container)"
-          
-          # Cleanup
-          docker stop test-chrome
-          docker rm test-chrome
 
-  release:
-    name: Create Release
-    runs-on: ubuntu-latest
-    needs: [build, security-scan, test]
-    if: startsWith(github.ref, 'refs/tags/')
-    
-    permissions:
-      contents: write
-    
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
         with:
-          name: Chrome CDP + noVNC ${{ github.ref_name }}
-          body: |
-            ## Chrome CDP + noVNC Docker Image ${{ github.ref_name }}
-            
-            ### Docker Images
-            
-            - `ghcr.io/${{ github.repository }}:${{ github.ref_name }}`
-            - `ghcr.io/${{ github.repository }}:latest`
-            
-            ### Supported Platforms
-            
-            - `linux/amd64`
-            - `linux/arm64`
-            
-            ### Usage
-            
-            ```yaml
-            # docker-compose.yml
-            services:
-              chrome-cdp-novnc:
-                image: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-                container_name: chrome-cdp-novnc
-                shm_size: "2gb"
-                security_opt:
-                  - seccomp:unconfined
-                cap_add:
-                  - SYS_ADMIN
-                ports:
-                  - "9222:9222"
-                  - "6080:6080"
-                volumes:
-                  - ./chrome-data:/data/chrome-profile
-            ```
-            
-            ### Quick Start
-            
-            ```bash
-            # Pull the image
-            docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-            
-            # Run with docker-compose
-            docker compose up -d
-            ```
-            
-            ### Access Points
-            
-            | Service | URL | Purpose |
-            |---------|-----|---------|
-            | **CDP** | `http://localhost:9222` | Browser automation endpoint |
-            | **noVNC** | `http://localhost:6080` | Web VNC interface |
-          generate_release_notes: true
-          draft: false
-          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+          name: docker-image
+
+      - name: Load and push image
+        run: |
+          docker load -i docker-image.tar
+
+          IMAGE_ID=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep "${{ env.IMAGE_NAME }}" | head -1)
+          echo "Loaded image: $IMAGE_ID"
+
+          # Tag for GHCR
+          TARGET="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          docker tag "$IMAGE_ID" "$TARGET"
+          docker push "$TARGET"
+          echo "Pushed $TARGET"
+
+          # Also push with SHA tag
+          TARGET_SHA="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          docker tag "$IMAGE_ID" "$TARGET_SHA"
+          docker push "$TARGET_SHA"
+          echo "Pushed $TARGET_SHA"
