@@ -50,9 +50,16 @@ sleep 1
 
 # Start noVNC
 echo "Starting noVNC..."
-/usr/share/novnc/utils/launch.sh --vnc localhost:5900 --listen 6080 2>/dev/null &
+cd /usr/share/novnc && ./utils/novnc_proxy --vnc localhost:5900 --listen 6080 2>/dev/null &
 NOVNC_PID=$!
 sleep 2
+
+# Verify noVNC is running
+if curl -s http://localhost:6080/vnc.html > /dev/null 2>&1; then
+    echo "noVNC is ready on port 6080"
+else
+    echo "WARNING: noVNC may not be ready"
+fi
 
 # Start Chrome (on internal port 9223)
 # Extensions ENABLED, full UI visible
