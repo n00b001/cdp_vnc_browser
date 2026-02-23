@@ -20,6 +20,7 @@ This workflow is NON-NEGOTIABLE for all code changes.
 - **NEVER push directly to main** - Always create a branch and PR
 - **Always create a PR** - Every code change must go through a pull request
 - **Never merge PRs without approval** - Create PR and wait for review/approval before merging
+- **Always monitor PR after pushing** - After pushing a PR, always monitor it and ensure the CI checks pass
 - Do not use `--admin` flag to bypass branch protection rules
 
 ## GitHub Actions Workflow Dependencies

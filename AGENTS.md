@@ -97,7 +97,9 @@ Create a pull request for review. Use the GitHub CLI:
 gh pr create --title "Description" --body "Details"
 ```
 
-**IMPORTANT: Do NOT merge PRs automatically. Wait for approval before merging. Never use `--admin` flag to bypass branch protection.**
+**IMPORTANT: After pushing a PR, always monitor it and ensure the CI checks pass.**
+
+Do NOT merge PRs automatically. Wait for approval before merging. Never use `--admin` flag to bypass branch protection.
 
 After approval, merge the pull request and delete the branch:
 
